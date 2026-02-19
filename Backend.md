@@ -94,29 +94,112 @@ MVP single worker → v1 horizontal workers + S3 + queue partitioning.
 **My Solution for problem 2:**
 
 ## System Design
-OAuth connection to LinkedIn → store encrypted tokens.  
-Persona stored per user → Draft generation → Schedule → Worker auto-post → PostLog for audit.
+User connects LinkedIn via OAuth → backend stores encrypted access + refresh tokens.  
+User creates Persona (tone, topics, do/don’t rules).  
+GenAI service generates 3 drafts → stored as Draft records.  
+User approves one draft → creates Schedule entry.  
+Scheduler service polls due schedules → sends job to worker.  
+Worker posts to LinkedIn API → stores result in PostLog.
+
+Components:
+- API Service (Spring Boot): OAuth, persona CRUD, draft approval, scheduling
+- Scheduler (cron/queue based): finds due posts using scheduled_time index
+- Worker Service: posts to LinkedIn, handles retries, token refresh
+- PostgreSQL: metadata storage
+- Redis/Queue: async posting jobs
+
+Flow:
+1. OAuth connect → store encrypted tokens
+2. Create persona → request draft generation (GenAI boundary)
+3. Save drafts → user approves one
+4. Create Schedule (PENDING)
+5. Scheduler → enqueue job when scheduled_time reached
+6. Worker → post to LinkedIn → update status POSTED/FAILED → write PostLog
 
 ## Schema
-User(id, email)  
-LinkedInAccount(id, user_id, access_token_enc, refresh_token_enc, expires_at)  
-Persona(id, user_id, tone, topics)  
-Draft(id, user_id, content, status)  
-Schedule(id, draft_id, scheduled_time, status)  
-PostLog(id, schedule_id, status, response, created_at)
+User(id, email)
+
+LinkedInAccount(
+  id,
+  user_id,
+  access_token_enc,
+  refresh_token_enc,
+  expires_at,
+  created_at
+)
+
+Persona(
+  id,
+  user_id,
+  tone,
+  topics,
+  do_dont_rules,
+  created_at
+)
+
+Draft(
+  id,
+  user_id,
+  persona_id,
+  content,
+  status,        -- DRAFT | APPROVED | REJECTED
+  created_at
+)
+
+Schedule(
+  id,
+  draft_id,
+  scheduled_time,
+  status,        -- PENDING | POSTED | FAILED
+  dedupe_key,
+  created_at
+)
+
+PostLog(
+  id,
+  schedule_id,
+  status,
+  linkedin_post_id,
+  response,
+  created_at
+)
+
+PromptConfig(
+  id,
+  version,
+  content,
+  created_at
+)
+
+## Constraints & Indexes
+Unique index on LinkedInAccount.user_id  
+Index on Schedule.scheduled_time for scheduler polling  
+Unique index on Schedule.dedupe_key to prevent double posting  
+FK: Draft.persona_id → Persona.id  
+FK: Schedule.draft_id → Draft.id  
+FK: PostLog.schedule_id → Schedule.id  
 
 ## Security
-AES-256 encrypted tokens, least-privilege scopes, per-user access control.
+OAuth with least-privilege scopes.  
+Access and refresh tokens encrypted using AES-256.  
+Tokens decrypted only inside worker at posting time.  
+User ownership validation on persona, drafts, and schedules.
 
 ## Reliability
-Dedupe key = hash(content + scheduled_time)  
-Retry with exponential backoff  
-Rate limiting per user  
-Automatic token refresh via worker
+Dedupe key = hash(draft_id + scheduled_time) to avoid double posting.  
+Retry with exponential backoff for transient LinkedIn failures.  
+Automatic token refresh using refresh_token before expiry.  
+Rate limiting per user to respect LinkedIn API limits.  
+PostLog keeps full audit trail.
 
-## Prompt Storage
-PromptConfig(id, version, content, created_at) for versioning and rollback.
+## Prompt / Config Storage
+PromptConfig table stores versioned prompt templates from GenAI team.  
+Each draft stores prompt version used → enables rollback and reproducibility.
 
+## Cost & Scalability
+MVP: single scheduler + single worker.  
+v1: horizontally scalable workers, queue partitioning, and delayed job queues.  
+Use scheduled_time index to avoid full table scans.
 
 ---
 
